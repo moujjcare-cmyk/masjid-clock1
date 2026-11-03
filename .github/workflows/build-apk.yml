@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (Native Silent Bridge)
 
 on:
   push:
@@ -36,6 +36,62 @@ jobs:
           if [ -f "$MANIFEST" ]; then
             sed -i 's/<application/<uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" \/>\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" \/>\n    <uses-permission android:name="android.permission.WAKE_LOCK" \/>\n    <application/' "$MANIFEST"
           fi
+
+      - name: Inject Native Hardware Silent Bridge into MainActivity.java
+        run: |
+          MAIN_ACTIVITY="android/app/src/main/java/com/dreamavenue/mosqueclock/MainActivity.java"
+          cat << 'EOF' > "$MAIN_ACTIVITY"
+          package com.dreamavenue.mosqueclock;
+
+          import android.os.Bundle;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+          import android.app.NotificationManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.provider.Settings;
+          import android.media.AudioManager;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onResume() {
+                  super.onResume();
+                  try {
+                      WebView webView = getBridge().getWebView();
+                      webView.addJavascriptInterface(new SilentBridge(this), "AndroidSilentBridge");
+                  } catch (Exception e) {}
+              }
+
+              public class SilentBridge {
+                  Context context;
+                  SilentBridge(Context c) { context = c; }
+
+                  @JavascriptInterface
+                  public void requestDNDPermission() {
+                      NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                      if (nm != null && !nm.isNotificationPolicyAccessGranted()) {
+                          Intent intent = new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS);
+                          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          context.startActivity(intent);
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public void setSilentMode(boolean silent) {
+                      NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                      AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+                      if (nm != null && am != null && nm.isNotificationPolicyAccessGranted()) {
+                          if (silent) {
+                              am.setRingerMode(AudioManager.RINGER_MODE_SILENT);
+                          } else {
+                              am.setRingerMode(AudioManager.RINGER_MODE_NORMAL);
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
 
       - name: Build Debug APK via Gradle
         run: |
