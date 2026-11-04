@@ -1,4 +1,4 @@
-name: Build Android APK (Native Silent Bridge)
+name: Build Android APK (Hardware Alarm & Swipe-Close Support)
 
 on:
   push:
@@ -30,20 +30,288 @@ jobs:
           npx cap add android || true
           npx cap copy android
 
-      - name: Inject DND Auto-Silent Permission into AndroidManifest.xml
+      - name: Inject Hardware Alarm Helper UI into Web Assets
+        run: |
+          INDEX_FILE="android/app/src/main/assets/public/index.html"
+          if [ -f "$INDEX_FILE" ]; then
+            cat << 'EOF' >> "$INDEX_FILE"
+          <script>
+          (function() {
+            function parseTo24H(timeStr) {
+              var m = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+              if (!m) return null;
+              var h = parseInt(m[1], 10);
+              var min = parseInt(m[2], 10);
+              var ap = m[3].toUpperCase();
+              if (ap === 'PM' && h < 12) h += 12;
+              if (ap === 'AM' && h === 12) h = 0;
+              return (h < 10 ? '0' + h : '' + h) + ':' + (min < 10 ? '0' + min : '' + min);
+            }
+
+            var lastSyncedCsv = '';
+            function syncPrayerTimesToNative() {
+              try {
+                if (!window.AndroidSilentBridge || !window.AndroidSilentBridge.syncPrayerTimes) return;
+                var bodyText = document.body ? document.body.innerText : '';
+                var prayers = ['فجر', 'ظہر', 'عصر', 'مغرب', 'عشاء'];
+                var extracted = [];
+                var allMatches = bodyText.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi) || [];
+                var converted = [];
+                for (var i = 0; i < allMatches.length; i++) {
+                  var c = parseTo24H(allMatches[i]);
+                  if (c) converted.push(c);
+                }
+                if (converted.length >= 15) {
+                  for (var p = 0; p < 5; p++) {
+                    var idx = p * 3;
+                    if (converted[idx]) extracted.push(converted[idx]);
+                  }
+                }
+                var csv = extracted.length === 5 ? extracted.join(',') : '05:40,13:30,16:00,17:18,19:00';
+                if (csv !== lastSyncedCsv) {
+                  lastSyncedCsv = csv;
+                  window.AndroidSilentBridge.syncPrayerTimes(csv);
+                }
+              } catch (e) {}
+            }
+
+            function injectExtraButtons() {
+              var buttons = document.querySelectorAll('button');
+              var targetBtn = null;
+              for (var i = 0; i < buttons.length; i++) {
+                if (buttons[i].innerText.indexOf('ٹیسٹ الرٹ') !== -1 || buttons[i].innerText.indexOf('سائلنٹ پرمیشن') !== -1) {
+                  targetBtn = buttons[i];
+                }
+              }
+              if (targetBtn && targetBtn.parentElement && !document.getElementById('native-swipe-test-btn')) {
+                var container = document.createElement('div');
+                container.style.cssText = 'display:flex;gap:8px;margin-top:10px;width:100%;flex-wrap:wrap;';
+
+                var test1MinBtn = document.createElement('button');
+                test1MinBtn.id = 'native-swipe-test-btn';
+                test1MinBtn.innerHTML = '⏱️ 1 منٹ بعد سوائپ کلوز سائلنٹ ٹیسٹ';
+                test1MinBtn.style.cssText = 'flex:1;padding:10px;border-radius:10px;background:#065f46;color:#fff;border:1px solid #10b981;font-weight:bold;font-size:13px;cursor:pointer;';
+                test1MinBtn.onclick = function() {
+                  if (window.AndroidSilentBridge && window.AndroidSilentBridge.startOneMinuteSwipeTest) {
+                    window.AndroidSilentBridge.startOneMinuteSwipeTest();
+                  }
+                };
+
+                var battBtn = document.createElement('button');
+                battBtn.innerHTML = '🔋 بیٹری پرمیشن (Unrestricted)';
+                battBtn.style.cssText = 'flex:1;padding:10px;border-radius:10px;background:#1e3a8a;color:#fff;border:1px solid #3b82f6;font-weight:bold;font-size:13px;cursor:pointer;';
+                battBtn.onclick = function() {
+                  if (window.AndroidSilentBridge && window.AndroidSilentBridge.requestBatteryPermission) {
+                    window.AndroidSilentBridge.requestBatteryPermission();
+                  }
+                };
+
+                targetBtn.parentElement.parentElement.appendChild(container);
+                container.appendChild(test1MinBtn);
+                container.appendChild(battBtn);
+              }
+            }
+
+            setInterval(function() {
+              syncPrayerTimesToNative();
+              injectExtraButtons();
+            }, 2500);
+
+            document.addEventListener('visibilitychange', function() {
+              if (!document.hidden) {
+                syncPrayerTimesToNative();
+              }
+            });
+          })();
+          </script>
+          EOF
+          fi
+
+      - name: Update AndroidManifest.xml with Hardware Alarm & Boot Receivers
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
-            sed -i 's/<application/<uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" \/>\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" \/>\n    <uses-permission android:name="android.permission.WAKE_LOCK" \/>\n    <application/' "$MANIFEST"
+            sed -i 's/<application/<uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" \/>\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" \/>\n    <uses-permission android:name="android.permission.WAKE_LOCK" \/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" \/>\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" \/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" \/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" \/>\n    <application/' "$MANIFEST"
+
+            sed -i 's/<\/application>/    <receiver android:name=".SilentAlarmReceiver" android:enabled="true" android:exported="true" \/>\n        <receiver android:name=".BootReceiver" android:enabled="true" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.BOOT_COMPLETED" \/>\n                <action android:name="android.intent.action.QUICKBOOT_POWERON" \/>\n            <\/intent-filter>\n        <\/receiver>\n    <\/application>/' "$MANIFEST"
           fi
 
-      - name: Inject Native Hardware Silent Bridge into MainActivity.java
+      - name: Create AlarmScheduler, SilentAlarmReceiver, BootReceiver & MainActivity
         run: |
-          MAIN_ACTIVITY="android/app/src/main/java/com/dreamavenue/mosqueclock/MainActivity.java"
-          cat << 'EOF' > "$MAIN_ACTIVITY"
+          PKG_DIR="android/app/src/main/java/com/dreamavenue/mosqueclock"
+          mkdir -p "$PKG_DIR"
+
+          cat << 'EOF' > "$PKG_DIR/AlarmScheduler.java"
+          package com.dreamavenue.mosqueclock;
+
+          import android.app.AlarmManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import java.util.Calendar;
+
+          public class AlarmScheduler {
+              private static final String PREFS_NAME = "MosqueClockPrefs";
+              private static final String KEY_TIMES = "prayer_times_csv";
+              private static final String DEFAULT_TIMES = "05:40,13:30,16:00,17:18,19:00";
+
+              public static void saveAndSchedule(Context context, String csvTimes) {
+                  SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                  prefs.edit().putString(KEY_TIMES, csvTimes).apply();
+                  scheduleDailyAlarmsFromPrefs(context);
+              }
+
+              public static void scheduleDailyAlarmsFromPrefs(Context context) {
+                  SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                  String csv = prefs.getString(KEY_TIMES, DEFAULT_TIMES);
+                  if (csv == null || csv.trim().isEmpty()) csv = DEFAULT_TIMES;
+
+                  String[] times = csv.split(",");
+                  long now = System.currentTimeMillis();
+
+                  for (int i = 0; i < times.length; i++) {
+                      String[] hm = times[i].trim().split(":");
+                      if (hm.length != 2) continue;
+                      try {
+                          int hour = Integer.parseInt(hm[0]);
+                          int min = Integer.parseInt(hm[1]);
+
+                          Calendar cal = Calendar.getInstance();
+                          cal.set(Calendar.HOUR_OF_DAY, hour);
+                          cal.set(Calendar.MINUTE, min);
+                          cal.set(Calendar.SECOND, 0);
+                          cal.set(Calendar.MILLISECOND, 0);
+
+                          if (cal.getTimeInMillis() <= now) {
+                              cal.add(Calendar.DAY_OF_YEAR, 1);
+                          }
+
+                          scheduleExactSilentStart(context, 100 + i, cal.getTimeInMillis(), 20);
+                      } catch (Exception e) {}
+                  }
+              }
+
+              public static void scheduleExactSilentStart(Context context, int reqCode, long triggerAtMillis, int durationMins) {
+                  AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                  if (am == null) return;
+
+                  Intent intent = new Intent(context, SilentAlarmReceiver.class);
+                  intent.setAction("ACTION_START_SILENT");
+                  intent.putExtra("DURATION_MINS", durationMins);
+                  intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                      context, reqCode, intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  Intent showIntent = new Intent(context, MainActivity.class);
+                  PendingIntent showPi = PendingIntent.getActivity(
+                      context, 0, showIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  AlarmManager.AlarmClockInfo clockInfo = new AlarmManager.AlarmClockInfo(triggerAtMillis, showPi);
+                  am.setAlarmClock(clockInfo, pi);
+              }
+
+              public static void scheduleRestoreAlarm(Context context, long restoreAtMillis) {
+                  AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                  if (am == null) return;
+
+                  Intent intent = new Intent(context, SilentAlarmReceiver.class);
+                  intent.setAction("ACTION_END_SILENT");
+                  intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                      context, 999, intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  Intent showIntent = new Intent(context, MainActivity.class);
+                  PendingIntent showPi = PendingIntent.getActivity(
+                      context, 0, showIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  AlarmManager.AlarmClockInfo clockInfo = new AlarmManager.AlarmClockInfo(restoreAtMillis, showPi);
+                  am.setAlarmClock(clockInfo, pi);
+              }
+          }
+          EOF
+
+          cat << 'EOF' > "$PKG_DIR/SilentAlarmReceiver.java"
+          package com.dreamavenue.mosqueclock;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.app.NotificationManager;
+          import android.media.AudioManager;
+          import android.os.PowerManager;
+
+          public class SilentAlarmReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                  PowerManager.WakeLock wl = null;
+                  if (pm != null) {
+                      wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MosqueClock:AlarmWakeLock");
+                      wl.acquire(10000);
+                  }
+                  try {
+                      String action = intent != null ? intent.getAction() : "";
+                      NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                      AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+
+                      if (nm != null && am != null && nm.isNotificationPolicyAccessGranted()) {
+                          if ("ACTION_START_SILENT".equals(action)) {
+                              try { am.setRingerMode(AudioManager.RINGER_MODE_SILENT); } catch (Exception e) {}
+                              try { nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY); } catch (Exception e) {}
+
+                              int durationMins = intent.getIntExtra("DURATION_MINS", 20);
+                              long restoreTime = System.currentTimeMillis() + (durationMins * 60 * 1000L);
+                              AlarmScheduler.scheduleRestoreAlarm(context, restoreTime);
+                          } else if ("ACTION_END_SILENT".equals(action)) {
+                              try { nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL); } catch (Exception e) {}
+                              try { am.setRingerMode(AudioManager.RINGER_MODE_NORMAL); } catch (Exception e) {}
+                          }
+                      }
+                      AlarmScheduler.scheduleDailyAlarmsFromPrefs(context);
+                  } catch (Exception e) {
+                  } finally {
+                      if (wl != null && wl.isHeld()) {
+                          wl.release();
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > "$PKG_DIR/BootReceiver.java"
+          package com.dreamavenue.mosqueclock;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  try {
+                      AlarmScheduler.scheduleDailyAlarmsFromPrefs(context);
+                  } catch (Exception e) {}
+              }
+          }
+          EOF
+
+          cat << 'EOF' > "$PKG_DIR/MainActivity.java"
           package com.dreamavenue.mosqueclock;
 
           import android.os.Bundle;
+          import android.os.PowerManager;
+          import android.net.Uri;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebView;
           import android.app.NotificationManager;
@@ -51,15 +319,32 @@ jobs:
           import android.content.Intent;
           import android.provider.Settings;
           import android.media.AudioManager;
+          import android.widget.Toast;
           import com.getcapacitor.BridgeActivity;
 
           public class MainActivity extends BridgeActivity {
+              private boolean bridgeAdded = false;
+
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  AlarmScheduler.scheduleDailyAlarmsFromPrefs(this);
+              }
+
               @Override
               public void onResume() {
                   super.onResume();
                   try {
                       WebView webView = getBridge().getWebView();
-                      webView.addJavascriptInterface(new SilentBridge(this), "AndroidSilentBridge");
+                      if (webView != null) {
+                          webView.onResume();
+                          webView.resumeTimers();
+                          if (!bridgeAdded) {
+                              webView.addJavascriptInterface(new SilentBridge(this), "AndroidSilentBridge");
+                              bridgeAdded = true;
+                          }
+                      }
+                      AlarmScheduler.scheduleDailyAlarmsFromPrefs(this);
                   } catch (Exception e) {}
               }
 
@@ -74,7 +359,36 @@ jobs:
                           Intent intent = new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS);
                           intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                           context.startActivity(intent);
+                      } else {
+                          requestBatteryPermission();
                       }
+                  }
+
+                  @JavascriptInterface
+                  public void requestBatteryPermission() {
+                      try {
+                          PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                          if (pm != null && !pm.isIgnoringBatteryOptimizations(context.getPackageName())) {
+                              Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                              intent.setData(Uri.parse("package:" + context.getPackageName()));
+                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                              context.startActivity(intent);
+                          } else {
+                              runOnUiThread(() -> Toast.makeText(context, "بیٹری اور بیک گراؤنڈ پرمیشن پہلے ہی مکمل فعال ہے!", Toast.LENGTH_LONG).show());
+                          }
+                      } catch (Exception e) {}
+                  }
+
+                  @JavascriptInterface
+                  public void syncPrayerTimes(String csvTimes) {
+                      AlarmScheduler.saveAndSchedule(context, csvTimes);
+                  }
+
+                  @JavascriptInterface
+                  public void startOneMinuteSwipeTest() {
+                      long triggerAt = System.currentTimeMillis() + (60 * 1000L);
+                      AlarmScheduler.scheduleExactSilentStart(context, 777, triggerAt, 1);
+                      runOnUiThread(() -> Toast.makeText(context, "ٹیسٹ الارم سیٹ! ابھی ایپ کو سوائپ کلوز کر دیں۔ ٹھیک 1 منٹ بعد فون سائلنٹ ہوگا اور 1 منٹ بعد واپس نارمل ہو جائے گا!", Toast.LENGTH_LONG).show());
                   }
 
                   @JavascriptInterface
@@ -83,9 +397,11 @@ jobs:
                       AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
                       if (nm != null && am != null && nm.isNotificationPolicyAccessGranted()) {
                           if (silent) {
-                              am.setRingerMode(AudioManager.RINGER_MODE_SILENT);
+                              try { am.setRingerMode(AudioManager.RINGER_MODE_SILENT); } catch (Exception e) {}
+                              try { nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY); } catch (Exception e) {}
                           } else {
-                              am.setRingerMode(AudioManager.RINGER_MODE_NORMAL);
+                              try { nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL); } catch (Exception e) {}
+                              try { am.setRingerMode(AudioManager.RINGER_MODE_NORMAL); } catch (Exception e) {}
                           }
                       }
                   }
